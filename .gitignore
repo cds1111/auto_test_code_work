@@ -1,0 +1,22 @@
+# --- Maven 编译产生的垃圾 ---
+target/
+*.class
+*.jar
+
+# --- Fuzzer 运行产生的临时文件 ---
+output/
+*.log
+fuzz_*.log
+
+# --- IDE (IDEA/VSCode) 的配置文件 ---
+.idea/
+*.iml
+.vscode/
+
+# --- 操作系统生成的垃圾 ---
+.DS_Store
+Thumbs.db
+
+# --- 如果你想保留种子和目标程序，就不写下面这些 ---
+# 但如果 targets 里的二进制文件特别大(超过100MB)，GitHub 会拒绝上传
+# 目前看你的 targets 应该没问题，所以不需要 ignore 它们

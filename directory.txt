@@ -1,0 +1,25 @@
+D:\myFuzzProject
+├── fuzz-mut-demos
+|  ├── fuzz-targets
+|  |  ├── edu
+|  |  └── init-seeds
+|  └── fuzzer-demo
+|     ├── output
+|     ├── product
+|     ├── src
+|     └── target
+├── seeds_collection
+|  ├── T01
+|  ├── T02
+|  ├── T03
+|  ├── T04
+|  ├── T05
+|  ├── T06
+|  ├── T07
+|  ├── T08
+|  ├── T09
+|  └── T10
+└── targets
+
+directory: 21
+
