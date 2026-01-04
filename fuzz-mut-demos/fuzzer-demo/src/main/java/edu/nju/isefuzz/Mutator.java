@@ -15,7 +15,10 @@ import java.util.Random;
 public class Mutator {
 
     private final Random random = new Random();
-
+    // [新增] PNG 文件头魔数 (8 bytes: 89 50 4E 47 0D 0A 1A 0A)
+    private static final byte[] PNG_MAGIC = new byte[] {
+            (byte)0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A
+    };
     // --- AFL 标准 "Interesting Values" (参考 afl-fuzz.h / config.h) ---
     private static final byte[] INTERESTING_8 = {
             (byte) -128, (byte) -1, 0, 1, 16, 32, 64, 100, 127
@@ -82,65 +85,148 @@ public class Mutator {
      * @param seed 原始种子
      * @param power 能量调度 (变异多少轮)
      */
-    public List<byte[]> generateHavoc(byte[] seed, int power) {
+    /**
+     * [修改版] Havoc (大破坏) 模式
+     * 对种子进行多次随机变异，并尝试修复 PNG 文件头
+     */
+    public List<byte[]> generateHavoc(byte[] seedData, int energy) {
         List<byte[]> mutants = new ArrayList<>();
 
-        for (int i = 0; i < power; i++) {
-            byte[] mutant = seed.clone();
-            // 对每个种子随机堆叠 1-8 个变异操作
-            int stackCount = 1 + random.nextInt(8);
-
-            for (int j = 0; j < stackCount; j++) {
-                int action = random.nextInt(6); // 随机选动作
-
-                switch (action) {
-                    case 0: // 随机翻转一个 bit
-                        if (mutant.length > 0) {
-                            int pos = random.nextInt(mutant.length * 8);
-                            mutant[pos / 8] ^= (1 << (pos % 8));
-                        }
-                        break;
-                    case 1: // 随机替换字节为 "Interesting Value"
-                        if (mutant.length > 0) {
-                            int pos = random.nextInt(mutant.length);
-                            mutant[pos] = INTERESTING_8[random.nextInt(INTERESTING_8.length)];
-                        }
-                        break;
-                    case 2: // 随机算术加减
-                        if (mutant.length > 0) {
-                            int pos = random.nextInt(mutant.length);
-                            int val = 1 + random.nextInt(35);
-                            if (random.nextBoolean()) mutant[pos] += (byte) val;
-                            else mutant[pos] -= (byte) val;
-                        }
-                        break;
-                    case 3: // 随机删除一段字节 (Block Deletion)
-                        if (mutant.length > 2) {
-                            int delLen = 1 + random.nextInt(mutant.length - 1);
-                            int delPos = random.nextInt(mutant.length - delLen);
-                            mutant = deleteBytes(mutant, delPos, delLen);
-                        }
-                        break;
-                    case 4: // 随机插入一段字节 (Block Insertion)
-                        if (mutant.length < 10240) { // 限制最大长度防止爆炸
-                            byte[] chunk = new byte[1 + random.nextInt(10)];
-                            random.nextBytes(chunk); // 随机数据，也可以是克隆的一段
-                            int insPos = random.nextInt(mutant.length + 1);
-                            mutant = insertBytes(mutant, insPos, chunk);
-                        }
-                        break;
-                    case 5: // 随机字节打乱 (Shuffle) - 简单模拟
-                        if (mutant.length > 0) {
-                            int pos = random.nextInt(mutant.length);
-                            mutant[pos] = (byte) random.nextInt(256);
-                        }
-                        break;
+        // 1. [新增] 检测当前种子是不是 PNG
+        boolean isPngMode = false;
+        if (seedData.length >= 8) {
+            boolean match = true;
+            for(int k=0; k<8; k++) {
+                if(seedData[k] != PNG_MAGIC[k]) {
+                    match = false;
+                    break;
                 }
             }
+            isPngMode = match;
+        }
+
+        for (int i = 0; i < energy; i++) {
+            byte[] mutant = seedData.clone();
+
+            // --- 随机叠加变异 (Stacked Mutations) ---
+            // 随机决定叠多少层 buff (1 到 16 次变异)
+            int stackCount = 1 + random.nextInt(15);
+
+            for (int j = 0; j < stackCount; j++) {
+                int type = random.nextInt(5); // 0-4 种算子
+                switch (type) {
+                    case 0: // Bitflip
+                        int pos = random.nextInt(mutant.length * 8);
+                        mutant[pos / 8] ^= (1 << (pos % 8));
+                        break;
+                    case 1: // Interesting 8
+                        if (mutant.length > 0) {
+                            int pos8 = random.nextInt(mutant.length);
+                            byte val8 = INTERESTING_8[random.nextInt(INTERESTING_8.length)];
+                            mutant[pos8] = val8;
+                        }
+                        break;
+                    case 2: // Interesting 16
+                        if (mutant.length >= 2) {
+                            int pos16 = random.nextInt(mutant.length - 1);
+                            short val16 = INTERESTING_16[random.nextInt(INTERESTING_16.length)];
+                            if (random.nextBoolean()) val16 = Short.reverseBytes(val16); // 随机大小端
+                            mutant[pos16] = (byte) val16;
+                            mutant[pos16 + 1] = (byte) (val16 >> 8);
+                        }
+                        break;
+                    case 3: // Interesting 32
+                        if (mutant.length >= 4) {
+                            int pos32 = random.nextInt(mutant.length - 3);
+                            int val32 = INTERESTING_32[random.nextInt(INTERESTING_32.length)];
+                            if (random.nextBoolean()) val32 = Integer.reverseBytes(val32);
+                            mutant[pos32] = (byte) val32;
+                            mutant[pos32 + 1] = (byte) (val32 >> 8);
+                            mutant[pos32 + 2] = (byte) (val32 >> 16);
+                            mutant[pos32 + 3] = (byte) (val32 >> 24);
+                        }
+                        break;
+                    case 4: // Random Byte (Havoc 特色)
+                        if (mutant.length > 0) {
+                            mutant[random.nextInt(mutant.length)] = (byte) random.nextInt(256);
+                        }
+                        break;
+                    // 如果你实现了 delete/insert/splice 也可以加在这里
+                }
+            }
+
+            // ==========================================
+            // [新增] 修复 PNG 头 (Post-Mutation Repair)
+            // ==========================================
+            if (isPngMode && mutant.length >= 8) {
+                for (int k = 0; k < 8; k++) {
+                    mutant[k] = PNG_MAGIC[k];
+                }
+            }
+
             mutants.add(mutant);
         }
         return mutants;
     }
+//    public List<byte[]> generateHavoc(byte[] seed, int power) {
+//        List<byte[]> mutants = new ArrayList<>();
+//
+//        for (int i = 0; i < power; i++) {
+//            byte[] mutant = seed.clone();
+//            // 对每个种子随机堆叠 1-8 个变异操作
+//            int stackCount = 1 + random.nextInt(8);
+//
+//            for (int j = 0; j < stackCount; j++) {
+//                int action = random.nextInt(6); // 随机选动作
+//
+//                switch (action) {
+//                    case 0: // 随机翻转一个 bit
+//                        if (mutant.length > 0) {
+//                            int pos = random.nextInt(mutant.length * 8);
+//                            mutant[pos / 8] ^= (1 << (pos % 8));
+//                        }
+//                        break;
+//                    case 1: // 随机替换字节为 "Interesting Value"
+//                        if (mutant.length > 0) {
+//                            int pos = random.nextInt(mutant.length);
+//                            mutant[pos] = INTERESTING_8[random.nextInt(INTERESTING_8.length)];
+//                        }
+//                        break;
+//                    case 2: // 随机算术加减
+//                        if (mutant.length > 0) {
+//                            int pos = random.nextInt(mutant.length);
+//                            int val = 1 + random.nextInt(35);
+//                            if (random.nextBoolean()) mutant[pos] += (byte) val;
+//                            else mutant[pos] -= (byte) val;
+//                        }
+//                        break;
+//                    case 3: // 随机删除一段字节 (Block Deletion)
+//                        if (mutant.length > 2) {
+//                            int delLen = 1 + random.nextInt(mutant.length - 1);
+//                            int delPos = random.nextInt(mutant.length - delLen);
+//                            mutant = deleteBytes(mutant, delPos, delLen);
+//                        }
+//                        break;
+//                    case 4: // 随机插入一段字节 (Block Insertion)
+//                        if (mutant.length < 10240) { // 限制最大长度防止爆炸
+//                            byte[] chunk = new byte[1 + random.nextInt(10)];
+//                            random.nextBytes(chunk); // 随机数据，也可以是克隆的一段
+//                            int insPos = random.nextInt(mutant.length + 1);
+//                            mutant = insertBytes(mutant, insPos, chunk);
+//                        }
+//                        break;
+//                    case 5: // 随机字节打乱 (Shuffle) - 简单模拟
+//                        if (mutant.length > 0) {
+//                            int pos = random.nextInt(mutant.length);
+//                            mutant[pos] = (byte) random.nextInt(256);
+//                        }
+//                        break;
+//                }
+//            }
+//            mutants.add(mutant);
+//        }
+//        return mutants;
+//    }
 
     /**
      * [阶段 5] Splice (拼接)

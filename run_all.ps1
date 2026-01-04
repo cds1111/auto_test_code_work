@@ -6,7 +6,7 @@ $projectPath = "D:\myFuzzProject"
 $imageName = "my_fuzzer_image_fixed"
 
 # Test duration in seconds (600s = 10 minutes)
-$testDuration = 18000
+$testDuration = 1800
 # =================================================
 
 # Define the 10 targets
@@ -38,6 +38,6 @@ foreach ($tid in $targets) {
 echo "---------------------------------------------------"
 echo "=== All 10 containers launched successfully! ==="
 echo "They are running in the background."
-echo "1. Wait for 5 hours."
+echo "1. Wait for 30 mins."
 echo "2. Check logs at: ${projectPath}\fuzz-mut-demos\fuzzer-demo\fuzz_Txx.log"
 echo "3. Check results at: ${projectPath}\fuzz-mut-demos\fuzzer-demo\output\Txx\trend.png"

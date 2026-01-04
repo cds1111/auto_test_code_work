@@ -54,6 +54,10 @@ public class Fuzzer {
      * 开始模糊测试
      * @param timeLimitSeconds 运行总时长（秒）
      */
+    /**
+     * 开始模糊测试 (优化版：分批处理防 OOM)
+     * @param timeLimitSeconds 运行总时长（秒）
+     */
     public void start(int timeLimitSeconds) {
         System.out.println("[*] Fuzzing started! Target: " + targetPath);
         long startTime = System.currentTimeMillis();
@@ -64,49 +68,56 @@ public class Fuzzer {
             while (System.currentTimeMillis() < endTime) {
                 // 1. [Schedule] 选一个种子
                 Seed seed = queue.getNext();
-                if (seed == null) break; // 应该不会发生
+                if (seed == null) break;
 
                 // 2. [Power] 决定变异多少次 (Energy)
                 int energy = powerSchedule.assignEnergy(seed);
 
-                // 3. [Mutate & Fuzz]
-                // 这里我们使用 Havoc 策略，随机变异多次
-                // (注：为了效率，真实的AFL会先做Deterministic，这里简化为直接Havoc)
-                List<byte[]> mutants = mutator.generateHavoc(seed.getData(), energy);
+                // [优化] 分批次变异，防止内存溢出 (OOM)
+                // 每次只生成 50 个变异体，跑完就释放内存
+                int batchSize = 50;
 
-                for (byte[] inputData : mutants) {
-                    // 4. [Execute] 运行目标
-                    TestRunner.ExecutionResult result = runner.run(targetPath, targetArgs, inputData, 1000);
+                for (int i = 0; i < energy; i += batchSize) {
+                    // 计算这一批次跑多少个
+                    int currentBatchCount = Math.min(batchSize, energy - i);
 
-                    // 5. [Monitor] 检查覆盖率
-                    boolean isNewPath = monitor.checkAndUpdate();
+                    // 3. [Mutate] 生成这一小批变异体
+                    List<byte[]> mutants = mutator.generateHavoc(seed.getData(), currentBatchCount);
 
-                    // 6. [Update Stats] 更新全局统计
-                    // 实际AFL在这里会做更多统计，我们简化
+                    for (byte[] inputData : mutants) {
+                        // 4. [Execute] 运行目标
+                        TestRunner.ExecutionResult result = runner.run(targetPath, targetArgs, inputData, 1000);
 
-                    // 7. [Save] 保存结果
-                    if (result.status == TestRunner.RunStatus.CRASH) {
-                        System.out.println("[!] CRASH FOUND! Exit code: " + result.exitCode);
-                        runner.saveInput(inputData, outputDir + "/crashes", "crash_" + result.exitCode);
-                    } else if (isNewPath) {
-                        // 发现新路径，作为新种子加入队列！
-                        System.out.println("[+] New path found! Total coverage: " + monitor.getTotalCoverage());
-                        Seed newSeed = new Seed("mut_" + runner.totalExecutions, inputData);
-                        newSeed.setExecTime(result.executionTime);
-                        newSeed.setBitmapSize(monitor.countCoverage()); // 记录这次覆盖了多少
-                        queue.addSeed(newSeed);
-                        runner.saveInput(inputData, outputDir + "/queue", "id_" + runner.totalExecutions);
+                        // 5. [Monitor] 检查覆盖率
+                        boolean isNewPath = monitor.checkAndUpdate();
 
-                        // 更新能量调度器的统计信息
-                        powerSchedule.updateStats(newSeed);
+                        // 6. [Save] 保存结果
+                        if (result.status == TestRunner.RunStatus.CRASH) {
+                            System.out.println("[!] CRASH FOUND! Exit code: " + result.exitCode);
+                            runner.saveInput(inputData, outputDir + "/crashes", "crash_" + result.exitCode);
+                        } else if (isNewPath) {
+                            System.out.println("[+] New path found! Total coverage: " + monitor.getTotalCoverage());
+                            Seed newSeed = new Seed("mut_" + runner.totalExecutions, inputData);
+                            newSeed.setExecTime(result.executionTime);
+                            newSeed.setBitmapSize(monitor.countCoverage());
+                            queue.addSeed(newSeed);
+                            runner.saveInput(inputData, outputDir + "/queue", "id_" + runner.totalExecutions);
+
+                            powerSchedule.updateStats(newSeed);
+                        }
+
+                        // 7. [Evaluate] 记录数据
+                        if (runner.totalExecutions % 50 == 0 || isNewPath) {
+                            evaluator.log(runner.totalExecutions, monitor.getTotalCoverage());
+                        }
+
+                        // 检查总时间
+                        if (System.currentTimeMillis() > endTime) break;
                     }
 
-                    // 8. [Evaluate] 记录数据给画图用 (每10次或者发现新路径时记一下，减少IO)
-                    if (runner.totalExecutions % 50 == 0 || isNewPath) {
-                        evaluator.log(runner.totalExecutions, monitor.getTotalCoverage());
-                    }
+                    // [关键] 主动断开引用，帮助 GC 回收这批内存
+                    mutants = null;
 
-                    // 检查时间是否到了
                     if (System.currentTimeMillis() > endTime) break;
                 }
             }
@@ -116,10 +127,76 @@ public class Fuzzer {
         } finally {
             System.out.println("[*] Fuzzing finished.");
             System.out.println("Total Executions: " + runner.totalExecutions);
-            monitor.cleanup();
-            evaluator.close();
+            if (monitor != null) monitor.cleanup();
+            if (evaluator != null) evaluator.close();
         }
     }
+    //    public void start(int timeLimitSeconds) {
+//        System.out.println("[*] Fuzzing started! Target: " + targetPath);
+//        long startTime = System.currentTimeMillis();
+//        long endTime = startTime + (timeLimitSeconds * 1000L);
+//
+//        try {
+//            // --- 主循环 (Fuzz Loop) ---
+//            while (System.currentTimeMillis() < endTime) {
+//                // 1. [Schedule] 选一个种子
+//                Seed seed = queue.getNext();
+//                if (seed == null) break; // 应该不会发生
+//
+//                // 2. [Power] 决定变异多少次 (Energy)
+//                int energy = powerSchedule.assignEnergy(seed);
+//
+//                // 3. [Mutate & Fuzz]
+//                // 这里我们使用 Havoc 策略，随机变异多次
+//                // (注：为了效率，真实的AFL会先做Deterministic，这里简化为直接Havoc)
+//                List<byte[]> mutants = mutator.generateHavoc(seed.getData(), energy);
+//
+//                for (byte[] inputData : mutants) {
+//                    // 4. [Execute] 运行目标
+//                    TestRunner.ExecutionResult result = runner.run(targetPath, targetArgs, inputData, 1000);
+//
+//                    // 5. [Monitor] 检查覆盖率
+//                    boolean isNewPath = monitor.checkAndUpdate();
+//
+//                    // 6. [Update Stats] 更新全局统计
+//                    // 实际AFL在这里会做更多统计，我们简化
+//
+//                    // 7. [Save] 保存结果
+//                    if (result.status == TestRunner.RunStatus.CRASH) {
+//                        System.out.println("[!] CRASH FOUND! Exit code: " + result.exitCode);
+//                        runner.saveInput(inputData, outputDir + "/crashes", "crash_" + result.exitCode);
+//                    } else if (isNewPath) {
+//                        // 发现新路径，作为新种子加入队列！
+//                        System.out.println("[+] New path found! Total coverage: " + monitor.getTotalCoverage());
+//                        Seed newSeed = new Seed("mut_" + runner.totalExecutions, inputData);
+//                        newSeed.setExecTime(result.executionTime);
+//                        newSeed.setBitmapSize(monitor.countCoverage()); // 记录这次覆盖了多少
+//                        queue.addSeed(newSeed);
+//                        runner.saveInput(inputData, outputDir + "/queue", "id_" + runner.totalExecutions);
+//
+//                        // 更新能量调度器的统计信息
+//                        powerSchedule.updateStats(newSeed);
+//                    }
+//
+//                    // 8. [Evaluate] 记录数据给画图用 (每10次或者发现新路径时记一下，减少IO)
+//                    if (runner.totalExecutions % 50 == 0 || isNewPath) {
+//                        evaluator.log(runner.totalExecutions, monitor.getTotalCoverage());
+//                    }
+//
+//                    // 检查时间是否到了
+//                    if (System.currentTimeMillis() > endTime) break;
+//                }
+//            }
+//
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//        } finally {
+//            System.out.println("[*] Fuzzing finished.");
+//            System.out.println("Total Executions: " + runner.totalExecutions);
+//            monitor.cleanup();
+//            evaluator.close();
+//        }
+//    }
 
     // ==========================================================
     // 配置入口：在这里修改你要跑哪个程序 (T01 - T10)
@@ -185,9 +262,21 @@ public class Fuzzer {
                 targetBin = "/app/targets/djpeg";
                 targetArgs = Arrays.asList("@@");
                 break;
+//            case "T06": // readpng
+//                targetBin = "/app/targets/readpng";
+//                targetArgs = Arrays.asList("@@");
+//                break;
+//            case "T06": // readpng
+//                targetBin = "/app/targets/readpng";
+//                // [修改] 增加第二个参数 /dev/null 作为输出路径
+//                // 这样命令就变成了: readpng /tmp/input.png /dev/null
+//                targetArgs = Arrays.asList("@@", "/dev/null");
+//                break;
             case "T06": // readpng
                 targetBin = "/app/targets/readpng";
-                targetArgs = Arrays.asList("@@");
+                // [修改] 既然是 Stdin 模式，就不传任何参数了
+                // 原来的 Arrays.asList("@@") 或 Arrays.asList("@@", "/dev/null") 统统去掉
+                targetArgs = new ArrayList<>();
                 break;
             case "T07": // xmllint
                 targetBin = "/app/targets/xmllint";

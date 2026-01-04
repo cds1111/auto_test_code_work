@@ -41,6 +41,10 @@ public class TestRunner {
     /**
      * 运行目标程序
      */
+
+    /**
+     * 运行目标程序 (修改版：支持 Stdin)
+     */
     public ExecutionResult run(String targetPath, List<String> args, byte[] inputData, int timeoutMs) {
         File inputFile = null;
         Process process = null;
@@ -49,38 +53,66 @@ public class TestRunner {
             // [新增] 每次运行，计数器+1
             totalExecutions++;
 
-            // 1. 创建临时种子文件
+            // 1. 创建临时种子文件 (为了兼容 readelf 等需要文件的程序)
             inputFile = File.createTempFile("fuzz_input_", ".bin");
             Files.write(inputFile.toPath(), inputData);
             String inputFilePath = inputFile.getAbsolutePath();
 
-            // 2. 构建命令
+            // 2. 构建命令 & 决策输入方式
             List<String> command = new ArrayList<>();
             command.add(targetPath);
+
+            boolean useStdin = false; // 默认不使用 Stdin
+
+            // 针对 cxxfilt 的特殊补丁：强制开启 Stdin
+            if (targetPath.contains("cxxfilt")|| targetPath.contains("readpng")) {
+                useStdin = true;
+            }
+
+            boolean hasFileArg = false;
             for (String arg : args) {
                 if (arg.equals("@@")) {
                     command.add(inputFilePath);
+                    hasFileArg = true;
                 } else {
                     command.add(arg);
                 }
             }
 
+            // 如果既不是 cxxfilt，参数里又没写 @@，通常意味着它可能也需要 Stdin (兜底策略)
+            // 但为了安全起见，我们目前只对 cxxfilt 做强制开启
+
             ProcessBuilder pb = new ProcessBuilder(command);
 
             // 3. 注入监控 (Shared Memory)
             if (monitor != null) {
-                monitor.clear(); // 清空当次位图
+                monitor.clear();
                 pb.environment().put("__AFL_SHM_ID", monitor.getShmIdString());
             }
 
-            // 4. 优化：丢弃输出流以提升速度 (Fuzzing通常不看stdout)
+            // 4. 处理 IO 流
+            // 输出流：Fuzzing 通常不关心 stdout，丢弃以提升速度
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+
+            // 输入流：如果不需要 Stdin，就设为 PIPE (默认) 或其他，但在 start 后不写入即可
+            // 这里不需要特别设置 redirectInput，默认就是 PIPE，允许我们 getOutputStream
 
             long startTime = System.currentTimeMillis();
             process = pb.start();
 
-            // 5. 等待结果
+            // 5. [关键修改] 如果需要 Stdin，在这里喂数据
+            if (useStdin) {
+                try (OutputStream os = process.getOutputStream()) {
+                    os.write(inputData);
+                    os.flush();
+                    // 写完必须关闭流，相当于发送 EOF，否则程序会一直等待导致 Hang
+                } catch (IOException e) {
+                    // 忽略写入错误 (比如程序崩溃极快，导致管道破裂)
+                }
+            }
+
+            // 6. 等待结果
             boolean finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
             long endTime = System.currentTimeMillis();
             long duration = endTime - startTime;
@@ -109,6 +141,74 @@ public class TestRunner {
             }
         }
     }
+//    public ExecutionResult run(String targetPath, List<String> args, byte[] inputData, int timeoutMs) {
+//        File inputFile = null;
+//        Process process = null;
+//
+//        try {
+//            // [新增] 每次运行，计数器+1
+//            totalExecutions++;
+//
+//            // 1. 创建临时种子文件
+//            inputFile = File.createTempFile("fuzz_input_", ".bin");
+//            Files.write(inputFile.toPath(), inputData);
+//            String inputFilePath = inputFile.getAbsolutePath();
+//
+//            // 2. 构建命令
+//            List<String> command = new ArrayList<>();
+//            command.add(targetPath);
+//            for (String arg : args) {
+//                if (arg.equals("@@")) {
+//                    command.add(inputFilePath);
+//                } else {
+//                    command.add(arg);
+//                }
+//            }
+//
+//            ProcessBuilder pb = new ProcessBuilder(command);
+//
+//            // 3. 注入监控 (Shared Memory)
+//            if (monitor != null) {
+//                monitor.clear(); // 清空当次位图
+//                pb.environment().put("__AFL_SHM_ID", monitor.getShmIdString());
+//            }
+//
+//            // 4. 优化：丢弃输出流以提升速度 (Fuzzing通常不看stdout)
+//            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+//            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+//
+//            long startTime = System.currentTimeMillis();
+//            process = pb.start();
+//
+//            // 5. 等待结果
+//            boolean finished = process.waitFor(timeoutMs, TimeUnit.MILLISECONDS);
+//            long endTime = System.currentTimeMillis();
+//            long duration = endTime - startTime;
+//
+//            if (!finished) {
+//                process.destroyForcibly();
+//                return new ExecutionResult(RunStatus.HANG, -1, duration);
+//            }
+//
+//            int exitCode = process.exitValue();
+//
+//            // Linux 信号处理: > 128 通常意味着被信号杀死 (Crash)
+//            if (exitCode > 128) {
+//                return new ExecutionResult(RunStatus.CRASH, exitCode, duration);
+//            } else {
+//                return new ExecutionResult(RunStatus.NORMAL, exitCode, duration);
+//            }
+//
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//            return new ExecutionResult(RunStatus.NORMAL, -1, 0);
+//        } finally {
+//            // 清理临时文件
+//            if (inputFile != null && inputFile.exists()) {
+//                inputFile.delete();
+//            }
+//        }
+//    }
 
     /**
      * [新增] 保存特殊测试用例 (满足作业要求: 保存特殊测试用例)
